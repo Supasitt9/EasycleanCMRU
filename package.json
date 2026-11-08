@@ -1,0 +1,16 @@
+{
+  "name": "easy-cleaner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Easy Clean booking demo with server-verified Google sign-in",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "check": "node --check app.js && node --check server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "google-auth-library": "^11.3.3"
+  }
+}
