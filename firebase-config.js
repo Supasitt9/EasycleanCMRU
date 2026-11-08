@@ -8,4 +8,4 @@ window.EASYCLEAN_FIREBASE_CONFIG = {
   messagingSenderId: "751968969852",
   storageBucket: "easy-clean-4aaac.firebasestorage.app"
 };
-window.EASYCLEAN_ADMIN_EMAIL = "admineasyclean@gmail.com";
+window.EASYCLEAN_ADMIN_EMAIL = "supasit934@gmail.com";

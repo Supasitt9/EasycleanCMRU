@@ -36,7 +36,7 @@ The hosted version uses Firebase Authentication and Cloud Firestore directly fro
    firebase deploy --only hosting,firestore:rules
    ```
 
-7. Open the Hosting URL printed by the deploy command. Register the administrator using `admineasyclean@gmail.com`, then verify that address through the email Firebase sends. Only that verified email receives admin privileges.
+7. Open the Hosting URL printed by the deploy command. Register the administrator using the email configured as `EASYCLEAN_ADMIN_EMAIL` in `firebase-config.js`, then verify that address through the email Firebase sends. Only that verified email receives admin privileges.
 
 The Firebase Web SDK is loaded from Google's CDN, so the hosted site needs an internet connection. Email/password accounts from the old local Node server cannot be transferred with their existing passwords; users must register again. Old browser-local data can only be imported from the browser that still has it, after that user signs in. QR slips and applicant documents are stored inside Firestore documents, so Firebase mode limits new files to 500 KB. Payments are demo records only; no real payment gateway is connected. Stay within the Firebase Spark quotas; Firebase Hosting and Authentication have free allowances, and Firestore has free daily quotas.
 
