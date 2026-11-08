@@ -22,7 +22,8 @@ const MAX_BODY_BYTES = 20 * 1024;
 const STATIC_FILES = new Set([
   "index.html", "dashboard.html", "services.html", "booking.html", "tracking.html",
   "addresses.html", "payments.html", "reviews.html", "career.html", "admin.html",
-  "account.html", "styles.css", "app.js", "assets/promptpay-qr.png"
+  "account.html", "styles.css", "app.js", "firebase-config.js", "firebase-loader.js",
+  "firebase-adapter.js", "assets/promptpay-qr.png"
 ]);
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",

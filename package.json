@@ -2,10 +2,10 @@
   "name": "easy-cleaner",
   "version": "1.0.0",
   "private": true,
-  "description": "Easy Clean booking demo with server-verified Google sign-in",
+  "description": "Easy Clean website with Firebase hosting and a local Node.js demo server",
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
-    "check": "node --check app.js && node --check server.js"
+    "check": "node --check app.js && node --check server.js && node --check firebase-adapter.js && node --check firebase-loader.js && node --check firebase-config.js"
   },
   "engines": {
     "node": ">=22"

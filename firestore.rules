@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email == 'admineasyclean@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isActiveUser() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/profiles/$(request.auth.uid))
+        && get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.active == true;
+    }
+
+    function ownsNewDocument() {
+      return isActiveUser()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.email == request.auth.token.email;
+    }
+
+    function ownsDocument() {
+      return isActiveUser() && resource.data.userId == request.auth.uid;
+    }
+
+    function defaultServicePriceMatches(serviceName, price) {
+      return (serviceName == 'ทำความสะอาดบ้าน' && price == 1290)
+        || (serviceName == 'ทำความสะอาดคอนโด' && price == 890)
+        || (serviceName == 'ทำความสะอาดห้องน้ำ' && price == 690)
+        || (serviceName == 'ทำความสะอาดห้องครัว' && price == 790)
+        || (serviceName == 'ทำความสะอาดห้องนอน' && price == 690)
+        || (serviceName == 'ทำความสะอาดสำนักงาน' && price == 1690);
+    }
+
+    function serviceDocumentExists(serviceId) {
+      return serviceId is string
+        && serviceId.matches('^[^/]+$')
+        && exists(/databases/$(database)/documents/services/$(serviceId));
+    }
+
+    function serviceDocumentPriceMatches(serviceId, serviceName, price) {
+      return get(/databases/$(database)/documents/services/$(serviceId)).data.name == serviceName
+        && get(/databases/$(database)/documents/services/$(serviceId)).data.price == price;
+    }
+
+    function validBookingPrice() {
+      return request.resource.data['price'] is number
+        && request.resource.data['price'] > 0
+        && request.resource.data['price'] <= 10000000
+        && (('serviceId' in request.resource.data
+            && serviceDocumentExists(request.resource.data['serviceId']))
+          ? serviceDocumentPriceMatches(
+              request.resource.data['serviceId'],
+              request.resource.data['service'],
+              request.resource.data['price'])
+          : defaultServicePriceMatches(
+              request.resource.data['service'],
+              request.resource.data['price']));
+    }
+
+    match /profiles/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.active == true
+        && (request.resource.data.role in ['customer', 'job-seeker']
+          || (request.resource.data.role == 'admin' && isAdmin()));
+      allow update: if isAdmin()
+        || (isActiveUser()
+          && request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firstName', 'lastName', 'phone', 'role'])
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.active == resource.data.active
+          && request.resource.data.role == (isAdmin() ? 'admin' : resource.data.role));
+      allow delete: if isAdmin();
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if ownsNewDocument()
+        && request.resource.data.status == 'รอชำระเงิน'
+        && request.resource.data['service'] is string
+        && request.resource.data['service'].size() <= 120
+        && validBookingPrice();
+      allow update: if isAdmin()
+        || (ownsDocument()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && (request.resource.data.status == 'ยกเลิกแล้ว'
+            || (request.resource.data.status == 'รอการยืนยัน'
+              && getAfter(/databases/$(database)/documents/payments/$(bookingId)).data.userId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/payments/$(bookingId)).data.status == 'ชำระแล้ว')));
+      allow delete: if isAdmin();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if ownsNewDocument()
+        && paymentId == request.resource.data.bookingId
+        && request.resource.data.status == 'ชำระแล้ว'
+        && request.resource.data.amount is number
+        && request.resource.data.method in ['โอนเงินผ่าน QR Code', 'เก็บเงินปลายทาง']
+        && (!('slipDataUrl' in request.resource.data)
+          || (request.resource.data.slipDataUrl is string && request.resource.data.slipDataUrl.size() < 900000))
+        && getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.userId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.price == request.resource.data.amount
+        && getAfter(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.status == 'รอการยืนยัน';
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /addresses/{addressId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if ownsNewDocument();
+      allow update: if isAdmin() || (ownsDocument() && ownsNewDocument());
+      allow delete: if isAdmin() || ownsDocument();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if ownsNewDocument()
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment.size() <= 2000;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /applications/{applicationId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if ownsNewDocument()
+        && request.resource.data.status == 'รอตรวจสอบ'
+        && request.resource.data.cvDataUrl.size() < 900000;
+      allow update: if isAdmin();
+      allow delete: if isAdmin() || ownsDocument();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAdmin() || ownsDocument();
+      allow create: if isAdmin() || ownsNewDocument();
+      allow update: if isAdmin()
+        || (ownsDocument()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']));
+      allow delete: if isAdmin() || ownsDocument();
+    }
+
+    match /services/{serviceId} {
+      allow read: if isActiveUser();
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}

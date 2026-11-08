@@ -50,6 +50,8 @@ const MENU = [
 ];
 let activeUser = null;
 let adminUsers = [];
+let firebaseSyncReady = false;
+let firebaseWriteQueue = Promise.resolve();
 let addressMap;
 let addressMarker;
 let addressGeocodeController;
@@ -57,6 +59,27 @@ let addressGeocodeTimer;
 let lastAddressGeocodeAt = 0;
 
 async function apiRequest(path, options = {}) {
+  if (window.easyCleanFirebase?.enabled) {
+    try {
+      return await window.easyCleanFirebase.request(path, options);
+    } catch (error) {
+      if (error.status) throw error;
+      const messages = {
+        "auth/invalid-email": "รูปแบบอีเมลไม่ถูกต้อง",
+        "auth/user-not-found": "ไม่พบบัญชีนี้ กรุณาสมัครสมาชิก",
+        "auth/wrong-password": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+        "auth/invalid-credential": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+        "auth/email-already-in-use": "อีเมลนี้มีบัญชีอยู่แล้ว กรุณาเข้าสู่ระบบ",
+        "auth/weak-password": "รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร",
+        "auth/too-many-requests": "ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอสักครู่",
+        "auth/popup-closed-by-user": "ปิดหน้าต่าง Google Sign-In ก่อนเข้าสู่ระบบ",
+        "permission-denied": "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้"
+      };
+      const mapped = new Error(messages[error.code] || error.message || "เกิดข้อผิดพลาด กรุณาลองอีกครั้ง");
+      mapped.status = error.code === "permission-denied" ? 403 : 400;
+      throw mapped;
+    }
+  }
   const response = await fetch(path, {
     credentials: "same-origin",
     ...options,
@@ -96,6 +119,25 @@ function write(key, value) {
     notify("บันทึกข้อมูลไม่ได้ กรุณาตรวจสอบพื้นที่จัดเก็บของเบราว์เซอร์");
     throw error;
   }
+  if (firebaseSyncReady && window.easyCleanFirebase?.enabled) {
+    firebaseWriteQueue = firebaseWriteQueue
+      .catch(() => undefined)
+      .then(() => window.easyCleanFirebase.syncCollection(key, value))
+      .catch((error) => {
+        console.error(`Could not sync ${key} to Firebase.`, error);
+        notify("ซิงก์ข้อมูลกับระบบออนไลน์ไม่สำเร็จ กรุณาลองบันทึกอีกครั้ง");
+        throw error;
+      });
+  }
+}
+
+function flushFirebaseWrites() {
+  return firebaseWriteQueue;
+}
+
+async function reloadAfterFirebaseWrites() {
+  await flushFirebaseWrites();
+  location.reload();
 }
 
 function escapeHtml(value) {
@@ -145,6 +187,39 @@ async function loadServerTransactions(user, isAdmin = false) {
     console.error("Could not migrate locally saved bookings to the server.", error);
     notify("ซิงก์รายการเดิมไม่สำเร็จ ระบบจะแสดงข้อมูลที่บันทึกบนเซิร์ฟเวอร์");
   }
+  if (window.easyCleanFirebase?.enabled) {
+    try {
+      await apiRequest("/api/data/sync", apiOptions({
+        data: {
+          addresses: read(STORE.addresses, []),
+          reviews: read(STORE.reviews, []),
+          applications: read(STORE.applications, []),
+          notifications: read(STORE.notifications, []),
+          services: isAdmin ? getServices() : []
+        }
+      }));
+    } catch (error) {
+      console.error("Could not import locally saved Easy Clean data.", error);
+      notify(error.message || "ย้ายข้อมูลเดิมไป Firebase ไม่สำเร็จ");
+    }
+    const data = await apiRequest("/api/data");
+    const collections = {
+      bookings: data.bookings || [],
+      payments: data.payments || [],
+      addresses: data.addresses || [],
+      reviews: data.reviews || [],
+      applications: data.applications || [],
+      notifications: data.notifications || [],
+      services: data.services?.length ? data.services : getServices()
+    };
+    for (const [collection, records] of Object.entries(collections)) {
+      const key = STORE[collection];
+      const otherAccounts = isAdmin ? [] : read(key, []).filter((record) => record.email !== user.email);
+      write(key, [...records, ...otherAccounts]);
+    }
+    firebaseSyncReady = true;
+    return { bookings: collections.bookings, payments: collections.payments };
+  }
   const result = await apiRequest(isAdmin ? "/api/admin/bookings" : "/api/bookings");
   const bookings = Array.isArray(result.bookings) ? result.bookings : [];
   const payments = Array.isArray(result.payments) ? result.payments : [];
@@ -161,6 +236,22 @@ async function loadServerTransactions(user, isAdmin = false) {
 }
 
 function startAdminTransactionPolling() {
+  if (window.easyCleanFirebase?.enabled) {
+    let reloadScheduled = false;
+    window.easyCleanFirebase.watchAdminTransactions(() => {
+      if (reloadScheduled) return;
+      reloadScheduled = true;
+      flushFirebaseWrites().then(() => location.reload()).catch((error) => {
+        console.error("Could not reload after live admin booking updates.", error);
+        reloadScheduled = false;
+        notify("อัปเดตรายการจองไม่สำเร็จ กรุณาโหลดหน้าใหม่");
+      });
+    }, (error) => {
+      console.error("Could not subscribe to live admin booking updates.", error);
+      notify("เชื่อมต่อการอัปเดตรายการจองแบบเรียลไทม์ไม่สำเร็จ");
+    });
+    return;
+  }
   let isLoading = false;
   window.setInterval(async () => {
     if (isLoading || document.hidden) return;
@@ -173,7 +264,7 @@ function startAdminTransactionPolling() {
         || JSON.stringify(payments) !== JSON.stringify(read(STORE.payments, []))) {
         write(STORE.bookings, bookings);
         write(STORE.payments, payments);
-        location.reload();
+        await reloadAfterFirebaseWrites();
       }
     } catch (error) {
       console.error("Could not refresh admin bookings from the server.", error);
@@ -192,7 +283,8 @@ function getServices() {
 function pushNotification(email, title, message, type = "general", id = `NOT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`) {
   const notifications = read(STORE.notifications, []);
   if (notifications.some((item) => item.id === id)) return;
-  notifications.unshift({ id, email, title, message, type, createdAt: Date.now(), read: false });
+  const recipient = email === activeUser?.email ? activeUser : adminUsers.find((account) => account.email === email);
+  notifications.unshift({ id, email, userId: recipient?.id || "", title, message, type, createdAt: Date.now(), read: false });
   write(STORE.notifications, notifications.slice(0, 1000));
   window.dispatchEvent(new CustomEvent("easyclean:notification", { detail: { email, title, message } }));
 }
@@ -263,6 +355,11 @@ async function configureGoogleButton() {
   const container = document.querySelector("#google-button");
   const message = document.querySelector("#google-status");
   try {
+    if (window.easyCleanFirebase?.enabled) {
+      container.innerHTML = '<button class="google-signin-action" type="button" data-google-signin>G&nbsp;&nbsp; ดำเนินการต่อด้วย Google</button>';
+      message.textContent = "เข้าสู่ระบบหรือสมัครบัญชีด้วยบัญชี Google ของคุณ";
+      return;
+    }
     const config = await apiRequest("/api/config");
     if (!config.googleEnabled) {
       message.textContent = "Google Sign-In ต้องตั้งค่า Google OAuth Client ID ก่อน";
@@ -341,7 +438,7 @@ async function renderAuth() {
           <div class="google-divider"><span>หรือ</span></div>
           <div id="google-button" class="google-button" aria-label="ดำเนินการต่อด้วย Google"></div>
           <p id="google-status" class="google-status" role="status">กำลังตรวจสอบการตั้งค่า Google Sign-In…</p>
-          <p class="demo-disclaimer">ระบบใช้ Google OAuth ตรวจสอบบัญชีผ่านเซิร์ฟเวอร์ · รหัสผ่านและ session ไม่เก็บไว้ใน localStorage</p>
+          <p class="demo-disclaimer">${window.easyCleanFirebase?.enabled ? "ระบบล็อกอินและข้อมูลบัญชีจัดเก็บผ่าน Firebase" : "ระบบใช้ Google OAuth ตรวจสอบบัญชีผ่านเซิร์ฟเวอร์ · รหัสผ่านและ session ไม่เก็บไว้ใน localStorage"}</p>
         </div>
       </section>
     </div>`;
@@ -652,7 +749,7 @@ async function onSubmit(event) {
       }));
       location.assign(authenticatedDestination());
     } else if (form.id === "register-form") {
-      await apiRequest("/api/auth/register", apiOptions({
+      const result = await apiRequest("/api/auth/register", apiOptions({
         firstName: String(data.get("firstName")).trim(),
         lastName: String(data.get("lastName")).trim(),
         email: String(data.get("email")).trim(),
@@ -660,6 +757,7 @@ async function onSubmit(event) {
         password: data.get("password"),
         role: data.get("role")
       }));
+      if (result.verificationEmailSent) sessionStorage.setItem("easyclean.verification-notice", "sent");
       location.assign("dashboard.html");
     } else if (form.id === "booking-form") {
       const user = currentUser();
@@ -678,6 +776,7 @@ async function onSubmit(event) {
         id: `EC-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`,
         email: user.email,
         service: service.name,
+        serviceId: encodeURIComponent(service.name),
         cleaningType: String(data.get("cleaningType")),
         date: String(data.get("date")),
         time: String(data.get("time")),
@@ -692,6 +791,7 @@ async function onSubmit(event) {
       const { booking: savedBooking } = await apiRequest("/api/bookings", apiOptions(booking));
       write(STORE.bookings, [savedBooking, ...getBookings().filter((item) => item.id !== savedBooking.id)]);
       pushNotification(user.email, "เริ่มทำรายการจองแล้ว", `${savedBooking.service} รอการยืนยันชำระเงินก่อนดำเนินการต่อ`, "booking", `BOOK-${savedBooking.id}`);
+      await flushFirebaseWrites();
       location.assign(`payments.html?booking=${encodeURIComponent(savedBooking.id)}`);
     } else if (form.id === "address-form") {
       const user = currentUser();
@@ -709,7 +809,7 @@ async function onSubmit(event) {
       next.push({ id: `ADDR-${Date.now()}`, email: user.email, label: String(data.get("label")), house: String(data.get("house")).trim(), street: String(data.get("street")).trim(), subdistrict: String(data.get("subdistrict")).trim(), district: String(data.get("district")).trim(), province: String(data.get("province")).trim(), postcode: String(data.get("postcode")).trim(), note: String(data.get("note")).trim(), latitude, longitude, default: makeDefault });
       write(STORE.addresses, next);
       notify("บันทึกที่อยู่แล้ว");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     } else if (form.id === "payment-form") {
       const user = currentUser();
       const booking = getBookings().find((item) => item.id === data.get("bookingId") && item.email === user.email);
@@ -728,8 +828,9 @@ async function onSubmit(event) {
         notify("กรุณาเลือกวิธีชำระเงิน");
         return;
       }
-      if (method === "qr" && file instanceof File && file.name && (!file.type.startsWith("image/") || file.size > 1024 * 1024)) {
-        notify("หลักฐานการโอนต้องเป็นไฟล์รูปภาพและมีขนาดไม่เกิน 1 MB");
+      const maxUploadBytes = window.easyCleanFirebase?.enabled ? 500 * 1024 : 1024 * 1024;
+      if (method === "qr" && file instanceof File && file.name && (!file.type.startsWith("image/") || file.size > maxUploadBytes)) {
+        notify(`หลักฐานการโอนต้องเป็นไฟล์รูปภาพและมีขนาดไม่เกิน ${window.easyCleanFirebase?.enabled ? "500 KB" : "1 MB"}`);
         return;
       }
       const paymentInput = {
@@ -751,6 +852,7 @@ async function onSubmit(event) {
       write(STORE.bookings, bookings);
       pushNotification(user.email, "ยืนยันการชำระเงินแล้ว", `บันทึกการชำระเงินสำหรับ ${booking.service} แล้ว`, "payment", `PAY-${payment.reference}`);
       notify("ยืนยันการชำระเงินแล้ว กำลังไปยังการติดตามการจอง");
+      await flushFirebaseWrites();
       location.assign("tracking.html");
     } else if (form.id === "review-form") {
       const user = currentUser();
@@ -767,14 +869,15 @@ async function onSubmit(event) {
       reviews.unshift({ email: user.email, bookingId: booking.id, service: booking.service, rating: Number(data.get("rating")), comment: String(data.get("comment")).trim(), date: new Intl.DateTimeFormat("th-TH", { dateStyle: "medium" }).format(new Date()) });
       write(STORE.reviews, reviews);
       notify("ขอบคุณสำหรับรีวิว");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     } else if (form.id === "career-form") {
       const user = currentUser();
       const file = data.get("cv");
       if (file instanceof File && file.name) {
         const extension = file.name.split(".").pop().toLowerCase();
-        if (!["pdf", "doc", "docx"].includes(extension) || file.size > 1024 * 1024) {
-          notify("ไฟล์ประวัติต้องเป็น PDF, DOC หรือ DOCX และมีขนาดไม่เกิน 1 MB");
+        const maxUploadBytes = window.easyCleanFirebase?.enabled ? 500 * 1024 : 1024 * 1024;
+        if (!["pdf", "doc", "docx"].includes(extension) || file.size > maxUploadBytes) {
+          notify(`ไฟล์ประวัติต้องเป็น PDF, DOC หรือ DOCX และมีขนาดไม่เกิน ${window.easyCleanFirebase?.enabled ? "500 KB" : "1 MB"}`);
           return;
         }
       }
@@ -783,7 +886,7 @@ async function onSubmit(event) {
       write(STORE.applications, applications);
       pushNotification(user.email, "ส่งใบสมัครแล้ว", "ระบบได้รับใบสมัครพนักงานของคุณแล้ว", "application", `APP-${applications[0].id}`);
       notify("ส่งใบสมัครแล้ว");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     } else if (form.id === "profile-form") {
       const user = currentUser();
       const result = await apiRequest("/api/auth/profile", apiOptions({
@@ -793,7 +896,7 @@ async function onSubmit(event) {
       }));
       activeUser = result.user;
       notify("บันทึกข้อมูลส่วนตัวแล้ว");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     } else if (form.id === "password-form") {
       await apiRequest("/api/auth/password", apiOptions({
         currentPassword: data.get("currentPassword"),
@@ -866,7 +969,35 @@ async function onClick(event) {
       notify(message);
     }, { enableHighAccuracy: true, timeout: 12000 });
   }
-  if (event.target.closest("[data-show-reset]")) notify("การรีเซ็ตรหัสผ่านทางอีเมลยังไม่เปิดใช้ กรุณาติดต่อผู้ดูแลระบบ");
+  if (event.target.closest("[data-show-reset]")) {
+    if (!window.easyCleanFirebase?.enabled) {
+      notify("การรีเซ็ตรหัสผ่านทางอีเมลยังไม่เปิดใช้ กรุณาติดต่อผู้ดูแลระบบ");
+      return;
+    }
+    const emailInput = document.querySelector('#login-form input[name="email"]');
+    let email = String(emailInput?.value || "").trim();
+    if (!email) email = String(window.prompt("กรุณากรอกอีเมลสำหรับรับลิงก์ตั้งรหัสผ่านใหม่") || "").trim();
+    if (!email) return;
+    try {
+      await apiRequest("/api/auth/password/reset", apiOptions({ email }));
+      notify("ส่งลิงก์ตั้งรหัสผ่านใหม่แล้ว กรุณาตรวจสอบอีเมล");
+    } catch (error) {
+      console.error("Could not send a password reset email.", error);
+      notify(error.message || "ส่งลิงก์ตั้งรหัสผ่านใหม่ไม่สำเร็จ");
+    }
+  }
+  const googleSignIn = event.target.closest("[data-google-signin]");
+  if (googleSignIn) {
+    googleSignIn.disabled = true;
+    try {
+      await apiRequest("/api/auth/google", apiOptions({}));
+      location.assign(authenticatedDestination());
+    } catch (error) {
+      console.error("Firebase Google sign-in failed.", error);
+      notify(error.message || "เข้าสู่ระบบด้วย Google ไม่สำเร็จ");
+      googleSignIn.disabled = false;
+    }
+  }
   if (event.target.closest("[data-signout]")) {
     apiRequest("/api/auth/logout", apiOptions({})).catch((error) => console.error("Sign out failed.", error)).finally(() => location.assign("index.html"));
   }
@@ -875,7 +1006,7 @@ async function onClick(event) {
     try {
       const { booking } = await apiRequest(`/api/bookings/${encodeURIComponent(cancel.dataset.cancelBooking)}`, { ...apiOptions({ status: "ยกเลิกแล้ว" }), method: "PATCH" });
       write(STORE.bookings, getBookings().map((item) => item.id === booking.id ? booking : item));
-      location.reload();
+      await reloadAfterFirebaseWrites();
     } catch (error) {
       console.error("Could not cancel the booking on the server.", error);
       notify(error.message || "ยกเลิกรายการจองไม่สำเร็จ");
@@ -885,7 +1016,7 @@ async function onClick(event) {
   if (deleteAddress && window.confirm("ต้องการลบที่อยู่นี้หรือไม่?")) {
     const user = currentUser();
     write(STORE.addresses, read(STORE.addresses, []).filter((item) => !(item.email === user.email && item.id === deleteAddress.dataset.deleteAddress)));
-    location.reload();
+    await reloadAfterFirebaseWrites();
   }
   const payButton = event.target.closest("[data-pay]");
   if (payButton) location.assign(`payments.html?booking=${encodeURIComponent(payButton.dataset.pay)}`);
@@ -930,7 +1061,7 @@ async function onChange(event) {
     } catch (error) {
       console.error("Could not update the booking status on the server.", error);
       notify(error.message || "อัปเดตสถานะการจองไม่สำเร็จ");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     }
   }
   const assignmentSelect = event.target.closest("[data-admin-assignment]");
@@ -946,7 +1077,7 @@ async function onChange(event) {
     } catch (error) {
       console.error("Could not assign a worker on the server.", error);
       notify(error.message || "บันทึกการมอบหมายพนักงานไม่สำเร็จ");
-      location.reload();
+      await reloadAfterFirebaseWrites();
     }
   }
   const paymentStatusSelect = event.target.closest("[data-admin-payment]");
@@ -996,6 +1127,14 @@ async function onChange(event) {
 }
 
 async function init() {
+  try {
+    await window.easyCleanFirebaseReady;
+    if (window.easyCleanFirebase?.enabled) await window.easyCleanFirebase.ready;
+  } catch (error) {
+    console.error("Could not initialize Firebase.", error);
+    notify("เริ่มต้น Firebase ไม่สำเร็จ กรุณาตรวจสอบการตั้งค่าโปรเจกต์");
+    return;
+  }
   localStorage.removeItem("easyclean.users");
   localStorage.removeItem("easyclean.session");
   sessionStorage.removeItem("easyclean.session");
@@ -1054,6 +1193,10 @@ async function init() {
   document.addEventListener("submit", onSubmit);
   document.addEventListener("click", onClick);
   document.addEventListener("change", onChange);
+  if (sessionStorage.getItem("easyclean.verification-notice") === "sent") {
+    sessionStorage.removeItem("easyclean.verification-notice");
+    notify("สมัครสมาชิกแล้ว กรุณายืนยันอีเมลจากกล่องจดหมาย");
+  }
   window.addEventListener("easyclean:notification", (event) => {
     refreshNotificationCenter();
     if ("Notification" in window && Notification.permission === "granted" && event.detail?.email === activeUser?.email) {

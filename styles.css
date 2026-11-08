@@ -427,6 +427,9 @@ table { width: 100%; border-collapse: collapse; text-align: left; white-space: n
 .google-divider { display: flex; align-items: center; gap: 12px; margin: 17px 0 13px; color: #a1aaa4; font-size: 9px; }
 .google-divider:before, .google-divider:after { height: 1px; flex: 1; background: #e9eee9; content: ""; }
 .google-button { min-height: 42px; display: flex; justify-content: center; }
+.google-signin-action { width: min(360px, 100%); min-height: 40px; padding: 8px 14px; border: 1px solid #dfe5e1; border-radius: 6px; background: #fff; color: #37433c; font: inherit; font-size: 11px; cursor: pointer; }
+.google-signin-action:hover { background: #f8faf8; }
+.google-signin-action:disabled { opacity: .6; cursor: wait; }
 .google-button-disabled { min-height: 38px; align-items: center; border: 1px dashed #dfe7df; border-radius: 7px; background: #fafcf9; }
 .google-status { min-height: 15px; margin: 6px 0 0; color: #8e9a92; font-size: 8px; text-align: center; }
 .google-button-disabled + .google-status { color: #9a7a4c; }
